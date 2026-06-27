@@ -7,14 +7,20 @@ const readline = require("readline");
 
 const HOME = process.env.HOME;
 const APP_DIR = path.join(HOME, "Applications");
-const APP_PATH = path.join(APP_DIR, "ClaudeNotify.app");
+const APP_PATH = path.join(APP_DIR, "ClaudeIsland.app");
 const MACOS_DIR = path.join(APP_PATH, "Contents", "MacOS");
-const RESOURCES_DIR = path.join(APP_PATH, "Contents", "Resources");
-const CONFIG_PATH = path.join(HOME, ".claude-notify.json");
-const SWIFT_SRC = path.join(__dirname, "..", "src", "notify.swift");
-const STOP_HOOK_SRC = path.join(__dirname, "..", "src", "stop-hook.sh");
+const ISLAND_SRC = path.join(__dirname, "..", "src", "island", "island.swift");
+const SEND_SRC = path.join(__dirname, "..", "src", "island", "island-send.swift");
+const HOOK_SRC = path.join(__dirname, "..", "src", "island", "island-hook.sh");
 const SETTINGS_PATH = path.join(HOME, ".claude", "settings.json");
+const LAUNCH_AGENTS = path.join(HOME, "Library", "LaunchAgents");
+const PLIST_LABEL = "com.claude-island.app";
+const PLIST_PATH = path.join(LAUNCH_AGENTS, `${PLIST_LABEL}.plist`);
+const EVENT_DIR = path.join(HOME, ".claude-island");
 const VERSION = require("../package.json").version;
+
+// Matches hooks owned by this tool or the legacy banner notifier we migrate from.
+const MINE = /claude-island|island-hook|ClaudeNotify|ClaudeCodeNotification|stop-hook/;
 
 // ── Colors ──────────────────────────────────────────────────────────────
 
@@ -42,18 +48,18 @@ function center(text, width) {
   return " ".repeat(left) + text + " ".repeat(right);
 }
 
-const titleBar = `─── ${c.reset}${c.bold}${c.white}claude-notification${c.reset} ${c.dim}v${VERSION} `;
-const titleVis = `─── claude-notification v${VERSION} `;
+const titleBar = `─── ${c.reset}${c.bold}${c.white}claude-island${c.reset} ${c.dim}v${VERSION} `;
+const titleVis = `─── claude-island v${VERSION} `;
 const titlePad = "─".repeat(Math.max(0, W - titleVis.length));
 
 const LOGO = `
 ${c.dim}╭${titleBar}${titlePad}╮${c.reset}
 ${c.dim}│${" ".repeat(W)}│${c.reset}
-${c.dim}│${c.reset}${center(`${c.peach}▐▛███▜▌${c.reset}`, W)}${c.dim}│${c.reset}
-${c.dim}│${c.reset}${center(`${c.peach}▝▜█████▛▘${c.reset}`, W)}${c.dim}│${c.reset}
-${c.dim}│${c.reset}${center(`${c.peach}▘▘ ▝▝${c.reset}`, W)}${c.dim}│${c.reset}
+${c.dim}│${c.reset}${center(`${c.white}╭─────────╮${c.reset}`, W)}${c.dim}│${c.reset}
+${c.dim}│${c.reset}${center(`${c.white}│ ${c.peach}◜◞${c.white}  ···· │${c.reset}`, W)}${c.dim}│${c.reset}
+${c.dim}│${c.reset}${center(`${c.white}╰─────────╯${c.reset}`, W)}${c.dim}│${c.reset}
 ${c.dim}│${" ".repeat(W)}│${c.reset}
-${c.dim}│${c.reset}${center(`${c.gray}Native macOS notifications for Claude Code${c.reset}`, W)}${c.dim}│${c.reset}
+${c.dim}│${c.reset}${center(`${c.gray}A live activity in your notch for Claude Code${c.reset}`, W)}${c.dim}│${c.reset}
 ${c.dim}│${c.reset}${center(`${c.dim}by Keshav Narula · x.com/narulakeshav${c.reset}`, W)}${c.dim}│${c.reset}
 ${c.dim}╰${"─".repeat(W)}╯${c.reset}
 `;
@@ -66,7 +72,6 @@ function hr() { console.log(`  ${c.dim}${"─".repeat(44)}${c.reset}`); }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 
-// Spinner for long operations
 function spinner(msg) {
   const frames = ["◐", "◓", "◑", "◒"];
   let i = 0;
@@ -87,64 +92,6 @@ function spinner(msg) {
   };
 }
 
-// ── Terminal presets ────────────────────────────────────────────────────
-
-const TERMINALS = {
-  warp: { name: "Warp", bundleId: "dev.warp.Warp-Stable", app: "Warp.app" },
-  iterm: { name: "iTerm2", bundleId: "com.googlecode.iterm2", app: "iTerm.app" },
-  terminal: { name: "Terminal", bundleId: "com.apple.Terminal", app: "Terminal.app" },
-  vscode: { name: "VS Code", bundleId: "com.microsoft.VSCode", app: "Visual Studio Code.app" },
-  cursor: { name: "Cursor", bundleId: "com.todesktop.230313mzl4w4u92", app: "Cursor.app" },
-  kitty: { name: "Kitty", bundleId: "net.kovidgoyal.kitty", app: "kitty.app" },
-  alacritty: { name: "Alacritty", bundleId: "org.alacritty", app: "Alacritty.app" },
-  ghostty: { name: "Ghostty", bundleId: "com.mitchellh.ghostty", app: "Ghostty.app" },
-};
-
-// ── Helpers ─────────────────────────────────────────────────────────────
-
-function ask(question) {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  return new Promise((resolve) => rl.question(`  ${c.orange}?${c.reset} ${question}`, (ans) => { rl.close(); resolve(ans.trim()); }));
-}
-
-function detectTerminal() {
-  const termProgram = process.env.TERM_PROGRAM || "";
-  if (termProgram.includes("Warp")) return "warp";
-  if (termProgram.includes("iTerm")) return "iterm";
-  if (termProgram === "Apple_Terminal") return "terminal";
-  if (termProgram === "vscode") return "vscode";
-  if (termProgram === "cursor") return "cursor";
-  if (termProgram === "ghostty") return "ghostty";
-  return null;
-}
-
-function findIcon(terminalApp) {
-  // Prefer Claude desktop icon
-  const claudeIcon = "/Applications/Claude.app/Contents/Resources/electron.icns";
-  if (fs.existsSync(claudeIcon)) return { path: claudeIcon, source: "Claude" };
-
-  // Fallback: use selected terminal's icon
-  if (terminalApp) {
-    try {
-      const icnsFiles = execSync(`ls /Applications/${terminalApp}/Contents/Resources/*.icns 2>/dev/null`, { encoding: "utf-8" }).trim().split("\n");
-      if (icnsFiles[0]) return { path: icnsFiles[0], source: terminalApp.replace(".app", "") };
-    } catch {}
-  }
-
-  return null;
-}
-
-// Notification preview card
-function showPreview(terminal) {
-  const project = path.basename(process.cwd());
-  log();
-  console.log(`  ${c.dim}╭──────────────────────────────────────────╮${c.reset}`);
-  console.log(`  ${c.dim}│${c.reset}  ${c.peach}▐▛▜▌${c.reset}  ${c.bold}${c.white}Claude Code · ${project}${c.reset}${" ".repeat(Math.max(0, 24 - project.length))}${c.dim}│${c.reset}`);
-  console.log(`  ${c.dim}│${c.reset}  ${c.peach}▝▜█▘${c.reset}  ${c.gray}Waiting for your input${c.reset}              ${c.dim}│${c.reset}`);
-  console.log(`  ${c.dim}╰──────────────────────────────────────────╯${c.reset}`);
-  info(`  Click → opens ${terminal.name}`);
-}
-
 // ── Install ─────────────────────────────────────────────────────────────
 
 async function install() {
@@ -152,89 +99,35 @@ async function install() {
   hr();
   log();
 
-  // Step 1: Detect or ask terminal
-  log(`${c.dim}Step 1 of 4${c.reset}  ${c.white}Terminal${c.reset}`);
-  log();
-
-  let terminalKey = detectTerminal();
-  if (terminalKey) {
-    done(`Detected ${c.bold}${c.white}${TERMINALS[terminalKey].name}${c.reset}`);
-    const ok = await ask(`Use ${TERMINALS[terminalKey].name}? ${c.dim}(Y/n)${c.reset} `);
-    if (ok.toLowerCase() === "n") terminalKey = null;
-  }
-
-  if (!terminalKey) {
-    log();
-    const keys = Object.keys(TERMINALS);
-    keys.forEach((key, i) => {
-      const num = `${c.orange}${String(i + 1).padStart(2)}${c.reset}`;
-      const name = `${c.white}${TERMINALS[key].name}${c.reset}`;
-      console.log(`    ${num}  ${name}`);
-    });
-    log();
-    const choice = await ask(`Pick a terminal ${c.dim}(1-${keys.length})${c.reset}: `);
-    const idx = parseInt(choice, 10) - 1;
-    if (idx >= 0 && idx < keys.length) {
-      terminalKey = keys[idx];
-    } else {
-      terminalKey = choice.toLowerCase();
-    }
-    if (!TERMINALS[terminalKey]) {
-      warn(`Unknown terminal: ${choice}`);
-      process.exit(1);
-    }
-    done(`Selected ${c.bold}${c.white}${TERMINALS[terminalKey].name}${c.reset}`);
-  }
-
-  const terminal = TERMINALS[terminalKey];
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify({ terminalBundleId: terminal.bundleId }, null, 2) + "\n");
-
-  // Step 2: Build
-  log();
-  hr();
-  log();
-  log(`${c.dim}Step 2 of 4${c.reset}  ${c.white}Build${c.reset}`);
+  // Step 1: Build
+  log(`${c.dim}Step 1 of 3${c.reset}  ${c.white}Build${c.reset}`);
   log();
 
   fs.mkdirSync(MACOS_DIR, { recursive: true });
-  fs.mkdirSync(RESOURCES_DIR, { recursive: true });
 
   const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.claude-notify.app</string>
+    <string>com.claude-island.app</string>
     <key>CFBundleName</key>
-    <string>Claude Notification</string>
+    <string>Claude Island</string>
     <key>CFBundleExecutable</key>
-    <string>notify</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
+    <string>island</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSUIElement</key>
     <true/>
-    <key>NSUserNotificationAlertStyle</key>
-    <string>banner</string>
 </dict>
 </plist>`;
   fs.writeFileSync(path.join(APP_PATH, "Contents", "Info.plist"), plist);
 
-  const icon = findIcon(terminal.app);
-  if (icon) {
-    fs.copyFileSync(icon.path, path.join(RESOURCES_DIR, "AppIcon.icns"));
-    done(`Using ${icon.source} icon`);
-  } else {
-    info("No icon found — notifications will use default macOS icon");
-  }
-
   const sp = spinner("Compiling native app...\n");
   try {
-    execSync(`swiftc -o "${path.join(MACOS_DIR, "notify")}" "${SWIFT_SRC}" -framework Cocoa -framework UserNotifications`, {
-      stdio: "pipe",
-    });
-    sp.stop("Compiled");
+    execSync(`swiftc -O -o "${path.join(MACOS_DIR, "island")}" "${ISLAND_SRC}" -framework Cocoa -framework SwiftUI`, { stdio: "pipe" });
+    execSync(`swiftc -O -o "${path.join(MACOS_DIR, "island-send")}" "${SEND_SRC}" -framework Foundation`, { stdio: "pipe" });
+    sp.stop("Compiled daemon + sender");
   } catch (e) {
     sp.fail("Compilation failed");
     log();
@@ -243,105 +136,125 @@ async function install() {
     process.exit(1);
   }
 
-  // Copy stop hook script
-  const stopHookDest = path.join(MACOS_DIR, "stop-hook.sh");
-  fs.copyFileSync(STOP_HOOK_SRC, stopHookDest);
-  fs.chmodSync(stopHookDest, 0o755);
-
-  // Step 3: Sign & Register
-  log();
-  hr();
-  log();
-  log(`${c.dim}Step 3 of 4${c.reset}  ${c.white}Sign & Register${c.reset}`);
-  log();
+  const hookDest = path.join(MACOS_DIR, "island-hook.sh");
+  fs.copyFileSync(HOOK_SRC, hookDest);
+  fs.chmodSync(hookDest, 0o755);
 
   execSync(`codesign --force --deep --sign - "${APP_PATH}"`, { stdio: "pipe" });
   done("Signed (ad-hoc)");
 
-  execSync(`/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "${APP_PATH}"`, { stdio: "pipe" });
-  done("Registered with macOS");
-
-  const child = spawn("open", [APP_PATH, "--args", "Claude Notify", "Setup complete"]);
-  child.unref();
-  done("Notification permission requested");
-
-  // Step 4: Configure hook
+  // Step 2: Background agent
   log();
   hr();
   log();
-  log(`${c.dim}Step 4 of 4${c.reset}  ${c.white}Hook${c.reset}`);
+  log(`${c.dim}Step 2 of 3${c.reset}  ${c.white}Background agent${c.reset}`);
   log();
 
-  const hookCommand = `pkill -f ClaudeNotify.app/Contents/MacOS/notify 2>/dev/null; ${MACOS_DIR}/notify 'Claude Code'`;
-  const stopHookCommand = `${MACOS_DIR}/stop-hook.sh`;
+  fs.mkdirSync(LAUNCH_AGENTS, { recursive: true });
+  fs.mkdirSync(EVENT_DIR, { recursive: true });
+  const agentPlist = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${PLIST_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${path.join(MACOS_DIR, "island")}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+</dict>
+</plist>`;
+  fs.writeFileSync(PLIST_PATH, agentPlist);
+  done("Installed LaunchAgent (auto-starts on login)");
+
+  // (Re)load the agent.
+  const uid = process.getuid();
+  try { execSync(`launchctl bootout gui/${uid}/${PLIST_LABEL}`, { stdio: "pipe" }); } catch {}
+  try {
+    execSync(`launchctl bootstrap gui/${uid} "${PLIST_PATH}"`, { stdio: "pipe" });
+    done("Launched — island is live in your notch");
+  } catch (e) {
+    // Fallback for older launchctl semantics.
+    try {
+      execSync(`launchctl load -w "${PLIST_PATH}"`, { stdio: "pipe" });
+      done("Launched — island is live in your notch");
+    } catch {
+      warn("Could not auto-launch; it will start on next login");
+    }
+  }
+
+  // Step 3: Hooks
+  log();
+  hr();
+  log();
+  log(`${c.dim}Step 3 of 3${c.reset}  ${c.white}Hooks${c.reset}`);
+  log();
 
   const autoConfig = await ask(`Auto-configure Claude Code hooks? ${c.dim}(Y/n)${c.reset} `);
   if (autoConfig.toLowerCase() !== "n") {
-    configureHook(hookCommand, stopHookCommand);
+    configureHooks(hookDest);
     done("Updated ~/.claude/settings.json");
   } else {
     log();
-    info("Add this to ~/.claude/settings.json:");
-    log();
-    console.log(`  ${c.dim}{${c.reset}`);
-    console.log(`  ${c.dim}  "hooks": {${c.reset}`);
-    console.log(`  ${c.dim}    "Notification": [{${c.reset}`);
-    console.log(`  ${c.dim}      "matcher": "*",${c.reset}`);
-    console.log(`  ${c.dim}      "hooks": [{ "type": "command", "command": "${hookCommand}" }]${c.reset}`);
-    console.log(`  ${c.dim}    }],${c.reset}`);
-    console.log(`  ${c.dim}    "Stop": [{${c.reset}`);
-    console.log(`  ${c.dim}      "matcher": "*",${c.reset}`);
-    console.log(`  ${c.dim}      "hooks": [{ "type": "command", "command": "${stopHookCommand}" }]${c.reset}`);
-    console.log(`  ${c.dim}    }]${c.reset}`);
-    console.log(`  ${c.dim}  }${c.reset}`);
-    console.log(`  ${c.dim}}${c.reset}`);
+    info("Add these hooks to ~/.claude/settings.json (see README).");
   }
 
   // Finale
   log();
   hr();
   log();
-
-  showPreview(terminal);
-
-  log();
-  hr();
-  log();
   console.log(`  ${c.orange}◆${c.reset} ${c.bold}${c.white}You're all set!${c.reset}`);
   log();
-  info("1. Enable notifications: System Settings → Notifications → Claude Notification");
-  info(`2. Test it: ${c.white}npx claude-notification test${c.reset}`);
+  info(`Test it: ${c.white}npx claude-island test${c.reset}`);
   log();
-  info(`${c.dim}You'll get notified when Claude needs input${c.reset}`);
-  info(`${c.dim}and when it finishes working — click to jump back to ${terminal.name}.${c.reset}`);
+  info(`${c.dim}The pill shows a live spinner while Claude works, expands${c.reset}`);
+  info(`${c.dim}when it needs you, and collapses to ✓ when it's done.${c.reset}`);
   log();
 }
 
-// ── Auto-configure hook ─────────────────────────────────────────────────
+// ── Hook config ───────────────────────────────────────────────────────────
 
-function configureHook(hookCommand, stopHookCommand) {
+function configureHooks(hookDest) {
   let settings = {};
   if (fs.existsSync(SETTINGS_PATH)) {
     settings = JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf-8"));
   } else {
     fs.mkdirSync(path.dirname(SETTINGS_PATH), { recursive: true });
   }
-
   if (!settings.hooks) settings.hooks = {};
-  settings.hooks.Notification = [
-    {
-      matcher: "permission_prompt",
-      hooks: [{ type: "command", command: hookCommand }],
-    },
-  ];
-  settings.hooks.Stop = [
-    {
-      matcher: "*",
-      hooks: [{ type: "command", command: stopHookCommand }],
-    },
-  ];
+
+  const hook = (event) => ({
+    matcher: "*",
+    hooks: [{ type: "command", command: `"${hookDest}" ${event}` }],
+  });
+
+  // Replace prior claude-island hooks and migrate off the old banner-based
+  // notifier (ClaudeNotify/ClaudeCodeNotification), preserving everything else.
+  const strip = (arr) =>
+    (arr || []).filter(
+      (n) => !n.hooks?.some((h) => MINE.test(h.command || ""))
+    );
+
+  settings.hooks.UserPromptSubmit = [...strip(settings.hooks.UserPromptSubmit), hook("prompt")];
+  settings.hooks.PreToolUse = [...strip(settings.hooks.PreToolUse), hook("tool")];
+  settings.hooks.PostToolUse = [...strip(settings.hooks.PostToolUse), hook("post")];
+  settings.hooks.Notification = [...strip(settings.hooks.Notification), hook("attention")];
+  settings.hooks.Stop = [...strip(settings.hooks.Stop), hook("stop")];
 
   fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + "\n");
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────
+
+function ask(question) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) =>
+    rl.question(`  ${c.orange}?${c.reset} ${question}`, (ans) => { rl.close(); resolve(ans.trim()); })
+  );
 }
 
 // ── Uninstall ───────────────────────────────────────────────────────────
@@ -351,24 +264,32 @@ function uninstall() {
   hr();
   log();
 
+  const uid = process.getuid();
+  try { execSync(`launchctl bootout gui/${uid}/${PLIST_LABEL}`, { stdio: "pipe" }); } catch {}
+  try { execSync(`launchctl unload -w "${PLIST_PATH}"`, { stdio: "pipe" }); } catch {}
+  if (fs.existsSync(PLIST_PATH)) {
+    fs.unlinkSync(PLIST_PATH);
+    done("Removed LaunchAgent");
+  }
+
   if (fs.existsSync(APP_PATH)) {
     fs.rmSync(APP_PATH, { recursive: true });
-    done("Removed ~/Applications/ClaudeNotify.app");
+    done("Removed ~/Applications/ClaudeIsland.app");
   }
-  if (fs.existsSync(CONFIG_PATH)) {
-    fs.unlinkSync(CONFIG_PATH);
-    done("Removed ~/.claude-notify.json");
+  if (fs.existsSync(EVENT_DIR)) {
+    fs.rmSync(EVENT_DIR, { recursive: true });
+    done("Removed ~/.claude-island");
   }
 
   if (fs.existsSync(SETTINGS_PATH)) {
     const settings = JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf-8"));
     let removed = false;
-    for (const hookType of ["Notification", "Stop"]) {
-      if (settings.hooks?.[hookType]) {
-        settings.hooks[hookType] = settings.hooks[hookType].filter(
-          (n) => !n.hooks?.some((h) => h.command?.includes("ClaudeNotify"))
+    for (const event of ["UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "Stop"]) {
+      if (settings.hooks?.[event]) {
+        settings.hooks[event] = settings.hooks[event].filter(
+          (n) => !n.hooks?.some((h) => MINE.test(h.command || ""))
         );
-        if (settings.hooks[hookType].length === 0) delete settings.hooks[hookType];
+        if (settings.hooks[event].length === 0) delete settings.hooks[event];
         removed = true;
       }
     }
@@ -380,36 +301,37 @@ function uninstall() {
   }
 
   log();
-  console.log(`  ${c.orange}◆${c.reset} ${c.bold}${c.white}Uninstalled.${c.reset} ${c.dim}Thanks for trying claude-notification!${c.reset}`);
+  console.log(`  ${c.orange}◆${c.reset} ${c.bold}${c.white}Uninstalled.${c.reset} ${c.dim}Thanks for trying claude-island!${c.reset}`);
   log();
 }
 
 // ── Test ────────────────────────────────────────────────────────────────
 
-function test() {
-  if (!fs.existsSync(path.join(MACOS_DIR, "notify"))) {
-    warn(`Not installed. Run: ${c.white}npx claude-notification install${c.reset}`);
+async function test() {
+  const send = path.join(MACOS_DIR, "island-send");
+  if (!fs.existsSync(send)) {
+    warn(`Not installed. Run: ${c.white}npx claude-island install${c.reset}`);
     process.exit(1);
   }
 
-  const testPayload = JSON.stringify({
-    message: "This is a test notification",
-    notification_type: "idle_prompt",
-    cwd: process.cwd(),
-  });
+  const push = (payload) => {
+    const child = spawn(send, [], { stdio: ["pipe", "ignore", "ignore"] });
+    child.stdin.write(JSON.stringify(payload));
+    child.stdin.end();
+  };
 
-  try { execSync("pkill -f ClaudeNotify.app/Contents/MacOS/notify 2>/dev/null", { stdio: "pipe" }); } catch {}
+  const project = path.basename(process.cwd());
+  log();
+  info("Running through the states — watch your notch…");
 
-  const child = spawn(path.join(MACOS_DIR, "notify"), ["Claude Code"], {
-    stdio: ["pipe", "inherit", "inherit"],
-  });
-  child.stdin.write(testPayload);
-  child.stdin.end();
-  child.unref();
+  push({ mode: "working", title: `Claude Code · ${project}`, detail: "Working…" });
+  await sleep(2200);
+  push({ mode: "attention", title: `Claude Code · ${project}`, detail: "Needs your permission to run a command" });
+  await sleep(2600);
+  push({ mode: "done", title: `Claude Code · ${project}`, detail: "All done — tests passing" });
 
   log();
-  done("Sent test notification");
-  info("Check your notification center");
+  done("Sent test sequence");
   log();
 }
 
@@ -433,10 +355,10 @@ switch (command) {
     log();
     log(`${c.white}Usage:${c.reset}`);
     log();
-    log(`  ${c.orange}install${c.reset}     Set up notifications`);
-    log(`  ${c.orange}test${c.reset}        Send a test notification`);
+    log(`  ${c.orange}install${c.reset}     Set up the notch island`);
+    log(`  ${c.orange}test${c.reset}        Run through the states`);
     log(`  ${c.orange}uninstall${c.reset}   Remove everything`);
     log();
-    info(`npx claude-notification install`);
+    info(`npx claude-island install`);
     log();
 }
