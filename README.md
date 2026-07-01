@@ -1,6 +1,6 @@
 # claude-code-island
 
-A live-activity **island in your Mac's notch** for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). It shows what every session is doing — thinking, running a tool, waiting on you, done — across all your terminals at once, and clicking a session jumps you back to the exact tab it's running in.
+A live-activity **island in your Mac's notch** for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). See what every session is doing — across all your terminals — and jump back to the exact tab with one click.
 
 ```bash
 npx claude-code-island install
@@ -8,16 +8,28 @@ npx claude-code-island install
 
 > Requires a Mac with a notch (macOS 13+) and Xcode Command Line Tools (`xcode-select --install`).
 
-<!-- TODO: add a screenshot / gif of the pill + dropdown here -->
+<!-- TODO: replace with a real screenshot / gif of the pill + dropdown -->
+![claude-code-island in the notch](docs/screenshot.png)
 
-## What you get
+## Every session at a glance
 
-- **A live pill in the notch** — a spinner while Claude works, an amber prompt when it needs your input, a green ✻ when it's done.
-- **Every session at a glance** — run Claude in 5 tabs and the pill aggregates the fleet; open the dropdown to see each one, grouped by repo + branch, with its live verb, turn timer, and context-window fill.
-- **Click to jump back** — click a session and it focuses the exact terminal tab it lives in (see terminal support below).
-- **Works across your terminals** — when you're running Claude in more than one app, each row is tagged with that app's icon so you can tell a Warp session from a Cursor one at a glance.
-- **Status taxonomy** — thinking, working, waiting for input, compacting, struggling (repeated tool errors), interrupted/declined (you hit Esc), and API errors — each with its own color and mark.
-- **Notch-hover peek** — hover the notch for your token-usage windows (5h / today / week).
+Run Claude Code in five tabs and the notch pill becomes a fleet dashboard — it tallies how many sessions are working, waiting on you, or done. Open the dropdown and each one is its own row, grouped by repo and branch, with its live verb, turn timer, and context-window fill.
+
+## Live status, not just a "done" ping
+
+The pill shows a spinner while Claude thinks or runs a tool, turns amber the moment a session needs your input, and settles to a green ✻ when it finishes. The full taxonomy is color-coded in real time: thinking, working, waiting for input, compacting, struggling (a run of tool errors), interrupted/declined (you hit Esc), and API errors.
+
+## Click to jump back to the exact tab
+
+Clicking a session focuses the precise terminal tab it's running in — not just the app. Warp uses its deep link, iTerm2 / Apple Terminal / Ghostty use AppleScript, and Cursor / VS Code use their CLI to focus the right workspace window. No hunting through tabs to find the one that's waiting on you.
+
+## Works across every terminal you use
+
+Warp, iTerm2, Apple Terminal, Ghostty, Cursor, and VS Code are all detected automatically. When you're running Claude in more than one app at once, each dropdown row is tagged with that app's icon, so a Warp session reads differently from a Cursor one at a glance.
+
+## Token and context awareness
+
+Every session carries a ring showing how full its context window is, so you can see who's about to compact. Hover the notch itself for a peek at your token-usage windows — the last 5 hours, today, and this week — without leaving what you're doing.
 
 ## Supported terminals
 
