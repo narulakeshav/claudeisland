@@ -127,6 +127,13 @@ func idleSessionsLabel(_ n: Int) -> String {
     n <= 0 ? "Idle" : "\(n) idle session\(n == 1 ? "" : "s")"
 }
 
+/// Same layout as `idleSessionsLabel` but without claiming the sessions are idle — used when
+/// the neutral "icon + count" pill is showing because a "Finished" pill was dismissed, not
+/// because everything is actually idle.
+func neutralSessionsLabel(_ n: Int) -> String {
+    n <= 0 ? "Idle" : "\(n) session\(n == 1 ? "" : "s")"
+}
+
 /// Whether a row draws a context ring (shared by the view and the controller's hit-test):
 /// only once the window is ≥25% full, and never on the grey idle/stale rows.
 func ringVisible(_ card: SessionCard) -> Bool {
@@ -172,6 +179,8 @@ final class IslandState: ObservableObject {
     @Published var focusURL: String = ""     // warp://session/<uuid> for this tab
     @Published var idleHint: Bool = false    // idle peek, stage 1: icon-only pulsing hint (pre-reveal)
     @Published var idleReveal: Double = 1    // 0→1 bouncy scale/opacity entrance for the idle peek
+    @Published var idleWaking: Bool = false  // brief "still alive" wink on click: swaps the
+                                              // static resting mark for the live gif, then settles back
 
     // ── Multi-session aggregate (≥2 sessions that have actually run) ─────────────
     // Past one session the front pill stops narrating a single tab and shows fleet
@@ -187,6 +196,10 @@ final class IslandState: ObservableObject {
     // When every tracked session is idle/stale, the island hides; a notch hover reveals an
     // "{n} idle sessions" pill that drops the roster list. This holds that count while hidden.
     @Published var idleSessionCount = 0
+    // true: `idleSessionCount` is showing because every visible session was dismissed (not
+    // because they're actually idle) — the `.idle` mode right text reads "{n} sessions"
+    // instead of "{n} idle sessions". Stays visible (never enters the hidden-idle regime).
+    @Published var neutralNotIdle = false
 
     // Notch geometry, set by the controller so the island can match it.
     @Published var notchHeight: CGFloat = 32
@@ -1126,8 +1139,13 @@ struct IslandView: View {
                 let rowLabel = (isFinished || isEscTerminal || isError) ? (card.preview.isEmpty ? titleText : card.preview)
                     : ((kRowTitleUsesPrompt && !livePrompt.isEmpty) ? livePrompt : titleText)
                 let name = Text(rowLabel).foregroundColor(titleColor)
-                if card.status == "working", !card.verb.isEmpty {
-                    verbRun(card.verb + " ", color: IslandView.coral, ultra: false) + name
+                // Claude Code's own "waiting on background agents" status isn't exposed to
+                // hooks — a session parked on live subagents with no fresher tool verb would
+                // otherwise show no prefix at all. Fall back to naming it explicitly so the row
+                // always reads as "doing something" instead of going blank.
+                let workingVerb = card.verb.isEmpty && card.subagentCount > 0 ? "Waiting for subagents…" : card.verb
+                if card.status == "working", !workingVerb.isEmpty {
+                    verbRun(workingVerb + " ", color: IslandView.coral, ultra: false) + name
                 } else if card.status == "thinking" {
                     verbRun(card.ultra ? "Ultrathinking… " : "Thinking… ", color: IslandView.amber, ultra: card.ultra) + name
                 } else if card.status == "compacting" {
@@ -1388,7 +1406,8 @@ struct IslandView: View {
         case .done:                      return clip(state.title)
         case .attention, .error:         return clip(state.preview)
         case .compacting, .compacted:    return ""
-        case .idle:                      return idleSessionsLabel(state.idleSessionCount)
+        case .idle:                      return state.neutralNotIdle
+            ? neutralSessionsLabel(state.idleSessionCount) : idleSessionsLabel(state.idleSessionCount)
         }
     }
     // Colored variant of `rightText`: the aggregate composes per-segment colors (green
@@ -1452,8 +1471,11 @@ struct IslandView: View {
             // (no reply yet) it shows the user's latest message instead. Marquee'd if it overflows.
             let showResponse = !state.preview.isEmpty
                 && (state.mode == .working || state.mode == .done)
+            // Idle has no message/title worth narrating — hovering the icon (off the literal
+            // notch) shows nothing rather than a bare "Claude Code"; hovering the notch itself
+            // still shows the usage peek via `state.notchPeek` below.
             let peekText = showResponse ? state.preview
-                : (state.lastUserMsg.isEmpty ? state.title : state.lastUserMsg)
+                : (state.mode == .idle ? "" : (state.lastUserMsg.isEmpty ? state.title : state.lastUserMsg))
             if frontPeekH > 0 && (state.notchPeek || !peekText.isEmpty) {
                 Group {
                     if state.notchPeek {
@@ -1503,7 +1525,7 @@ struct IslandView: View {
                 Text("\(pct)% context used").foregroundColor(barColor)
                 if !reset.isEmpty {
                     Text("·").foregroundColor(textColor)
-                    Text("resets in \(reset)").foregroundColor(textColor)
+                    Text("resets in \(reset)").foregroundColor(pctResetColor(state.rlSession))
                 }
             }
         } else if !(state.usageSession.isEmpty && state.usageToday.isEmpty) {
@@ -1533,6 +1555,12 @@ struct IslandView: View {
         if v >= 85 { return IslandView.red }
         if v >= 60 { return IslandView.amber }
         return Color(white: 0.55)
+    }
+
+    // "resets in [time]": grey while the bar is still white (nothing to worry about), white
+    // once the bar has gone yellow/red (the reset becomes the thing worth noticing).
+    private func pctResetColor(_ s: String) -> Color {
+        pctColor(s) == .white ? Color(white: 0.55) : .white
     }
 
     // Time until a rate-limit window resets, from its epoch `resets_at`: "3d 2h" / "2h 14m" / "57m".
@@ -1620,9 +1648,13 @@ struct IslandView: View {
         case .idle:
             // Resting "paused" Claude mark; falls back to a neutral glyph if the asset is missing.
             // During the hover-hint stage it breathes (scale + opacity) to confirm the hover;
-            // once revealed in full it settles to a steady mark.
+            // once revealed in full it settles to a steady mark. A click briefly swaps it for
+            // the live working gif — a "still alive" wink — before settling back (idleWaking,
+            // toggled by handleIslandClick).
             Group {
-                if FileManager.default.fileExists(atPath: kPausedImagePath) {
+                if state.idleWaking {
+                    icon(kGifPath, fallback: AnyView(Spinner(accent: accent, mode: .working)))
+                } else if FileManager.default.fileExists(atPath: kPausedImagePath) {
                     GIFView(path: kPausedImagePath, animates: false).frame(width: 18, height: 18).clipped()
                 } else {
                     Image(systemName: "pause.fill").font(.system(size: 11, weight: .semibold)).foregroundColor(accent).frame(width: 16)
@@ -1855,6 +1887,8 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var lastSingleFocus: String?        // the tab that last held the front as the lone
                                                 // running session; lets its completion keep the
                                                 // single "Finished" pill instead of an aggregate count
+    private var dismissedDoneIds: Set<String> = []  // clicked-away "Finished" pills — excluded
+                                                // from front-selection until they do something new
 
     // Live pill geometry, reported by the view (which computes it deterministically).
     // The mouse monitor hit-tests the cursor against this — both use the same numbers,
@@ -1993,6 +2027,14 @@ final class AppController: NSObject, NSApplicationDelegate {
                     if !inZone && !overIsland && !s.dropdownOpen { hideIdlePeek() }
                     return
                 }
+                // No idle sessions either — the bare "Idle" pill. Still peek the token-usage
+                // stats on the literal notch, same as every other state.
+                let overNotch = pointInNotchRegion(p)
+                if s.notchPeek != overNotch {
+                    s.notchPeek = overNotch
+                    if overNotch { refreshUsage() }
+                }
+                if s.frontHovered != overNotch { setFrontHover(overNotch) }
                 // No idle sessions: the transient "Idle" peek hides once you leave it.
                 let keep = inZone || overIsland
                 if !keep && !s.dropdownOpen { hideIdlePeek() }
@@ -2042,6 +2084,12 @@ final class AppController: NSObject, NSApplicationDelegate {
                         openDropdown()
                     } else if let b = bucket {
                         s.dropdownFilter = b
+                        openDropdown()
+                    } else if s.mode == .idle && s.neutralNotIdle && pointInFrontPill(p) && !overNotch {
+                        // The dismissed-neutral "{n} sessions" pill has no "{n} ⌄" back-peek
+                        // (suppressed for .idle mode, same as the hidden-idle pill) — hovering
+                        // the pill itself opens the dropdown directly instead.
+                        s.dropdownFilter = ""
                         openDropdown()
                     }
                 } else if !overIsland {
@@ -2659,7 +2707,13 @@ final class AppController: NSObject, NSApplicationDelegate {
         let id = sf.id ?? fallbackID
         let s = sessions[id] ?? LiveSession()
         sessions[id] = s
-        if let v = sf.mode { s.mode = v }
+        if let v = sf.mode {
+            s.mode = v
+            // A dismissed "Finished" pill un-dismisses the moment this session does anything
+            // new (a fresh turn, a permission ask, etc.) — the click only silenced that one
+            // completion, not this session forever.
+            if !["done", "declined", "interrupted", "compacted"].contains(v) { dismissedDoneIds.remove(id) }
+        }
         if let v = sf.detail { s.detail = v }
         if let v = sf.preview { s.preview = v }   // omitted by emit_keep → retained
         if let v = sf.firstPrompt, !v.isEmpty { s.firstPrompt = v }
@@ -2713,6 +2767,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     private func rebuild() {
+        IslandState.shared.neutralNotIdle = false   // only the dismissed-front branch below sets this
         let suppress = staleDuplicateTabs()
         let vis = visibleSessions(suppressing: suppress)
         guard !vis.isEmpty else {
@@ -2768,13 +2823,21 @@ final class AppController: NSObject, NSApplicationDelegate {
         func effMode(_ k: String, _ v: LiveSession) -> String { delegating.contains(k) ? "working" : v.mode }
         func isRunning(_ k: String, _ v: LiveSession) -> Bool { runModes.contains(effMode(k, v)) }
 
-        let runningKeys = vis.filter { isRunning($0.key, $0.value) }.map(\.key)
-        let needYouLive = vis.contains { $0.value.mode == "attention" }
+        // Dismissed "Finished" pills (clicked away) are ineligible to be re-fronted — fall
+        // back to the full `vis` for the selection math ONLY when every candidate has been
+        // dismissed (`allFrontsDismissed`), purely so the calls below have something to pick
+        // from; the actual displayed mode gets overridden to the neutral pill further down.
+        let frontVis = vis.filter { !dismissedDoneIds.contains($0.key) }
+        let allFrontsDismissed = frontVis.isEmpty
+        let selectionVis = allFrontsDismissed ? vis : frontVis
+
+        let runningKeys = selectionVis.filter { isRunning($0.key, $0.value) }.map(\.key)
+        let needYouLive = selectionVis.contains { $0.value.mode == "attention" }
         let focusedRunning = runningKeys.count == 1 && !needYouLive
 
         let now = Date().timeIntervalSince1970
         let newestTs = vis.values.map { $0.ts }.max() ?? 0
-        if let c = clickFocus, vis[c] == nil || newestTs > clickFocusTs {
+        if let c = clickFocus, selectionVis[c] == nil || newestTs > clickFocusTs {
             clickFocus = nil
         }
         // Remember the lone running tab so its completion can keep the single pill.
@@ -2785,7 +2848,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         // completion lands elsewhere, or this one goes stale (>15 min).
         let focusedDone: Bool = {
             guard !focusedRunning, !needYouLive, runningKeys.isEmpty,
-                  let k = lastSingleFocus, let v = vis[k],
+                  let k = lastSingleFocus, let v = selectionVis[k],
                   doneFamily.contains(v.mode), now - v.ts <= 900 else { return false }
             return v.ts >= newestTs
         }()
@@ -2795,7 +2858,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             front = runningKeys[0]
         } else if focusedDone {
             front = lastSingleFocus!
-        } else if let c = clickFocus, vis[c] != nil {
+        } else if let c = clickFocus, selectionVis[c] != nil {
             front = c
         } else {
             // Headline-matched front: the count pill announces a single bucket (need-you >
@@ -2811,12 +2874,12 @@ final class AppController: NSObject, NSApplicationDelegate {
                 { _, v in v.mode == "error" },
             ]
             func freshest(_ pred: (String, LiveSession) -> Bool) -> String? {
-                vis.filter { pred($0.key, $0.value) }
+                selectionVis.filter { pred($0.key, $0.value) }
                    .max(by: { ($0.value.promptTs, $0.value.ts) < ($1.value.promptTs, $1.value.ts) })?.key
             }
             front = buckets.lazy.compactMap(freshest).first
-                ?? vis.max(by: { ($0.value.promptTs, $0.value.ts) < ($1.value.promptTs, $1.value.ts) })?.key
-                ?? vis.keys.sorted().first!
+                ?? selectionVis.max(by: { ($0.value.promptTs, $0.value.ts) < ($1.value.promptTs, $1.value.ts) })?.key
+                ?? selectionVis.keys.sorted().first!
         }
         frontUUID = front
         let f = vis[front]!
@@ -2838,6 +2901,20 @@ final class AppController: NSObject, NSApplicationDelegate {
         state.lastUserMsg = f.lastUserMsg
         state.contextPct = statuslineContext(f.transcript) ?? f.context
         state.focusURL = f.focus
+
+        // Every visible session has had its "Finished" pill dismissed (clicked away) and
+        // nothing else is running/waiting — reset to a neutral "icon + count" pill instead of
+        // re-fronting the same dismissed session. This stays visible (unlike the hidden-idle
+        // regime); the roster/dropdown built below still lists every session normally.
+        if allFrontsDismissed {
+            state.mode = .idle
+            state.neutralNotIdle = true
+            state.idleSessionCount = vis.count
+            state.detail = ""
+            state.preview = ""
+            state.lastUserMsg = ""
+            state.title = "Claude Code"
+        }
 
         // Back cards: the other live sessions, most-recent first. The uuid breaks ties
         // deterministically so equal-timestamp cards keep a STABLE order — otherwise the
@@ -2961,11 +3038,15 @@ final class AppController: NSObject, NSApplicationDelegate {
         state.errorCount = errored
         // ≥2 sessions that have run → count aggregate, UNLESS a single running tab has claimed
         // the front for its full live activity (then show that, not the counts).
-        state.aggregate = !focusedRunning && !focusedDone && (running + needYou + done + errored) >= 2
+        state.aggregate = !allFrontsDismissed && !focusedRunning && !focusedDone && (running + needYou + done + errored) >= 2
 
         // Nothing live, waiting, or errored (all stale / idle) → hide the island entirely.
         if running + needYou + done + errored == 0 {
             Ticker.shared.stop()
+            // Genuinely nothing left (even the dismissed session has gone stale) — this is the
+            // real idle regime, not the dismissed-neutral one, so it always reads "idle
+            // sessions" regardless of the override above.
+            state.neutralNotIdle = false
             if state.dropdownOpen {
                 // The idle pill's dropdown is open: hold the "{n} idle sessions" presentation
                 // (don't flip to a stale front pill or tear the panel down) and refresh the
@@ -3426,10 +3507,25 @@ final class AppController: NSObject, NSApplicationDelegate {
     /// Front-pill click: focus its Warp tab; if it's done, dismiss that card.
     func handleIslandClick() {
         let s = IslandState.shared
+        // A little "still alive" wink on the resting mark: briefly swap it for the live
+        // working gif, then settle back. Purely cosmetic — doesn't change what the click does.
+        if s.mode == .idle && !s.idleWaking {
+            s.idleWaking = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { IslandState.shared.idleWaking = false }
+        }
         // Persistent "{n} idle sessions" pill: a click just toggles its dropdown — never
         // focuses/dismisses a session (there's no meaningful "front" while everything's idle).
         if hiddenIdle && s.mode == .idle && s.idleSessionCount >= 1 {
             if s.dropdownOpen { closeDropdown() } else { openDropdown() }
+            return
+        }
+        // A "Finished" single-session pill: click just acknowledges it — reset to the neutral
+        // icon + count pill instead of jumping to the tab (you already know it's done). Not a
+        // tab switch, and not the hidden-idle regime — this stays visible. It un-dismisses on
+        // its own the moment that session does anything new (see `merge()`).
+        if s.mode == .done && !s.aggregate, let front = frontUUID {
+            dismissedDoneIds.insert(front)
+            rebuild()
             return
         }
         // The front ticker focuses its own tab. The dropdown is opened ONLY by the
