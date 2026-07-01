@@ -1,13 +1,13 @@
 {
-  "name": "claude-notification",
-  "version": "1.1.4",
-  "description": "Native macOS notifications for Claude Code — with custom icon, click-to-focus terminal, and contextual messages",
+  "name": "claudeisland",
+  "version": "0.1.0",
+  "description": "A live-activity island in your Mac's notch for Claude Code — see what every session is doing across all your terminals, and click to jump back to the right tab.",
   "bin": {
-    "claude-notification": "bin/cli.js"
+    "claudeisland": "bin/cli.js"
   },
   "files": [
     "bin/",
-    "src/"
+    "src/island/"
   ],
   "os": [
     "darwin"
@@ -15,9 +15,13 @@
   "keywords": [
     "claude",
     "claude-code",
-    "notifications",
     "macos",
-    "terminal"
+    "notch",
+    "dynamic-island",
+    "live-activity",
+    "terminal",
+    "agents",
+    "statusline"
   ],
   "repository": {
     "type": "git",
