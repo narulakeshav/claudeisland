@@ -69,6 +69,47 @@ func focusSession() {
     }
 }
 
+/// Map a session's focus descriptor (and id, for idle/no-focus cases) to the owning terminal
+/// app's bundle id — the key for its icon. nil = an app we can't identify (folds into the
+/// anonymous "local" card), so no icon is drawn.
+func terminalBundleId(focus: String, id: String) -> String? {
+    if focus.hasPrefix("warp://") { return "dev.warp.Warp-Stable" }
+    if focus.hasPrefix("app:") { return String(focus.dropFirst(4)) }
+    if focus.hasPrefix("editor:") {  // editor:<bundleid>:<cwd>
+        return focus.dropFirst("editor:".count).split(separator: ":", maxSplits: 1).first.map(String.init)
+    }
+    if focus.hasPrefix("term:iterm2:") { return "com.googlecode.iterm2" }
+    if focus.hasPrefix("term:apple_terminal:") { return "com.apple.Terminal" }
+    // Idle tabs / empty focus: fall back to the id prefix the hook and daemon both key on.
+    if id.hasPrefix("iterm-") { return "com.googlecode.iterm2" }
+    if id.hasPrefix("aterm-") { return "com.apple.Terminal" }
+    if id.hasPrefix("ghostty-") { return "com.mitchellh.ghostty" }
+    if id.hasPrefix("cursor-") { return "com.todesktop.230313mzl4w4u92" }
+    if id.hasPrefix("vscode-") { return "com.microsoft.VSCode" }
+    // A bare hex id with no scheme is a Warp tab (uuid-keyed).
+    if !id.isEmpty, id != "local", id.allSatisfy({ $0.isHexDigit }) { return "dev.warp.Warp-Stable" }
+    return nil
+}
+
+private var _appIconCache: [String: NSImage] = [:]
+/// The app icon for a bundle id, cached (rendered per-row, so memoize). Prefers a running
+/// instance's icon, else resolves on disk; Warp ships two channels (Stable/Preview) so fall
+/// back to any running "warp" app.
+func appIcon(bundleId: String) -> NSImage? {
+    if let c = _appIconCache[bundleId] { return c }
+    let running = NSWorkspace.shared.runningApplications
+    var img: NSImage?
+    if let a = running.first(where: { $0.bundleIdentifier == bundleId }) { img = a.icon }
+    else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
+        img = NSWorkspace.shared.icon(forFile: url.path)
+    } else if bundleId.lowercased().contains("warp"),
+              let a = running.first(where: { ($0.bundleIdentifier ?? "").lowercased().contains("warp") }) {
+        img = a.icon
+    }
+    if let img { _appIconCache[bundleId] = img }
+    return img
+}
+
 // Text measurement. SwiftUI GeometryReader/PreferenceKey reads come back 0 inside
 // this non-activating NSPanel hosting context (verified: L/R/Pill all measured 0),
 // so we can't measure laid-out views. Instead we size everything deterministically
@@ -177,6 +218,7 @@ final class IslandState: ObservableObject {
     @Published var project: String = ""
     @Published var contextPct: Double = 0    // 0…1 fill of the context window
     @Published var focusURL: String = ""     // warp://session/<uuid> for this tab
+    @Published var showTermIcons = false     // roster spans ≥2 terminal apps → tag each row with its app icon
     @Published var idleHint: Bool = false    // idle peek, stage 1: icon-only pulsing hint (pre-reveal)
     @Published var idleReveal: Double = 1    // 0→1 bouncy scale/opacity entrance for the idle peek
     @Published var idleWaking: Bool = false  // brief "still alive" wink on click: swaps the
@@ -409,7 +451,7 @@ struct Marquee: View {
     let color: Color
     let width: CGFloat
     @ObservedObject var clock: MarqueeClock
-    private static let font = NSFont(name: kSansFontName, size: 11) ?? .systemFont(ofSize: 11)
+    private static let font = NSFont(name: kSansFontName, size: 13) ?? .systemFont(ofSize: 13)
     private static let gap: CGFloat = 48
 
     var body: some View {
@@ -418,7 +460,7 @@ struct Marquee: View {
         let oneLine = text.replacingOccurrences(of: "\n", with: " ")
                           .replacingOccurrences(of: "\t", with: " ")
         let textW = textWidth(oneLine, Marquee.font)
-        let label = Text(oneLine).font(.custom(kSansFontName, size: 11)).foregroundColor(color).lineLimit(1).fixedSize()
+        let label = Text(oneLine).font(.custom(kSansFontName, size: 13)).foregroundColor(color).lineLimit(1).fixedSize()
         let overflow = textW > width
         return Group {
             if !overflow {
@@ -827,7 +869,7 @@ struct IslandView: View {
         case "struggling":        return IslandView.amber  // stuck in a run of tool errors
         case "declined", "interrupted": return Color(white: 0.6)  // Esc'd — resolved/halted
         case "stale":             return Color(white: 0.5)   // done, unattended >15 min
-        default:                  return Color(white: 0.55)
+        default:                  return Color.white.opacity(0.45)  // idle — matches the inactive title's alpha, not a flat grey
         }
     }
 
@@ -998,7 +1040,7 @@ struct IslandView: View {
     private func dropdownHeader(_ item: DropdownItem) -> some View {
         HStack(spacing: 0) {
             headerLabel(item, active: headerActive(item))
-                .font(.custom(kSansFontName, size: 11))
+                .font(.custom(kSansFontName, size: 13))
                 .lineLimit(1)
             Spacer(minLength: 8)
             // Context fill of the active session, floated to the header's right edge: a ring +
@@ -1089,6 +1131,10 @@ struct IslandView: View {
                 .font(.system(size: 9, weight: .bold))
                 .foregroundColor(Color(white: 0.55))
                 .frame(width: 8)
+        } else if status == "working" {
+            BusyGlyph(color: IslandView.coral, interval: 0.20)
+        } else if status == "thinking" {
+            BusyGlyph(color: ultra ? IslandView.ultraRed : IslandView.amber, interval: 0.3)
         } else {
             Circle().fill(ultra ? IslandView.ultraRed : dotColor(status)).frame(width: 8, height: 8)
         }
@@ -1117,6 +1163,18 @@ struct IslandView: View {
         // instead of trailing it on the right, where it duplicated what the peek already shows.
         let timerOnLeft = (card.status == "done" || card.status == "stale") && !card.elapsed.isEmpty
         return HStack(spacing: 10) {
+            // When the roster spans ≥2 terminal apps, each row leads with its app's icon so you
+            // can tell a Warp session from a Cursor one at a glance. Fixed-width slot (drawn empty
+            // for apps we can't identify) keeps the status dots vertically aligned across rows.
+            if state.showTermIcons {
+                if let bid = terminalBundleId(focus: card.focus, id: card.id), let ic = appIcon(bundleId: bid) {
+                    Image(nsImage: ic).resizable().interpolation(.high)
+                        .frame(width: 14, height: 14)
+                        .opacity(isInactiveStatus(card.status) ? 0.5 : 0.95)
+                } else {
+                    Color.clear.frame(width: 14, height: 14)
+                }
+            }
             rowMarker(card.status, ultra: card.ultra && card.status == "thinking")
             if timerOnLeft {
                 Text(card.elapsed)
@@ -1480,7 +1538,7 @@ struct IslandView: View {
                 Group {
                     if state.notchPeek {
                         usagePeekView
-                            .font(.custom(kSansFontName, size: 11))
+                            .font(.custom(kSansFontName, size: 13))
                             .lineLimit(1)
                             .frame(maxWidth: pillWidth - 28)
                     } else {
@@ -1520,9 +1578,8 @@ struct IslandView: View {
             let textColor = pctTextColor(state.rlSession)
             let reset = fmtReset(state.rlSessionReset)
             HStack(spacing: 6) {
-                Text("Session").foregroundColor(grey)
-                UsageBar(fraction: Double(pct) / 100, color: barColor)
-                Text("\(pct)% context used").foregroundColor(barColor)
+                ContextRing(pct: Double(pct) / 100, colorOverride: barColor)
+                Text("\(pct)% session limit used").foregroundColor(barColor)
                 if !reset.isEmpty {
                     Text("·").foregroundColor(textColor)
                     Text("resets in \(reset)").foregroundColor(pctResetColor(state.rlSession))
@@ -1632,9 +1689,9 @@ struct IslandView: View {
     @ViewBuilder private var leadingSingle: some View {
         switch state.mode {
         case .thinking:
-            icon(state.ultra ? kUltraThinkGifPath : kThinkingGifPath, fallback: AnyView(Spinner(accent: accent, mode: .working)))
+            BusyGlyph(color: state.ultra ? IslandView.ultraRed : accent, interval: 0.3, size: 17, pulse: true)
         case .working:
-            icon(kGifPath, fallback: AnyView(Spinner(accent: accent, mode: .working)))
+            BusyGlyph(color: accent, interval: 0.2, size: 17)
         case .attention:
             Image(systemName: "exclamationmark").font(.system(size: 13, weight: .bold)).foregroundColor(accent).frame(width: 14).modifier(WobbleMarker(active: true))
         case .error:
@@ -1732,6 +1789,58 @@ struct WobbleMarker: ViewModifier {
     }
 }
 
+/// Cycles a "working"/"thinking" row's marker through Claude Code's own busy
+/// glyphs (✳✽✶✢✻) instead of a static dot. Own timer per instance rather
+/// than borrowing `Ticker`: Ticker only runs while the FRONT session is
+/// thinking/working, so a background row stuck on "working" while the front
+/// session is elsewhere (e.g. attention) would otherwise never animate.
+final class GlyphClock: ObservableObject {
+    @Published var t: Double = 0   // continuously running elapsed time, in seconds
+    private var timer: Timer?
+    init() {
+        let tm = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            self?.t += 1.0 / 60.0
+        }
+        RunLoop.main.add(tm, forMode: .common)
+        timer = tm
+    }
+    deinit { timer?.invalidate() }
+}
+
+/// Replaces the plain status dot for a "working"/"thinking" row with Claude
+/// Code's own busy-spinner glyphs, cycling in place. `interval` sets the
+/// cadence — faster for "working" reads as busier, slower for "thinking"
+/// reads more contemplative. `pulse` additionally breathes the opacity
+/// between 100% and 85% each cycle, in sync with the glyph swap — reserved
+/// for the front-pill "thinking" mark, where the extra motion reads as
+/// deliberate rather than busy.
+struct BusyGlyph: View {
+    static let glyphs = ["✳", "✽", "✶", "✢", "✻", "·"]
+    let color: Color
+    let interval: Double
+    let size: CGFloat
+    let pulse: Bool
+    @StateObject private var clock = GlyphClock()
+
+    init(color: Color, interval: Double, size: CGFloat = 11, pulse: Bool = false) {
+        self.color = color
+        self.interval = interval
+        self.size = size
+        self.pulse = pulse
+    }
+
+    private var frame: Int { Int(clock.t / interval) % Self.glyphs.count }
+    private var pulseOpacity: Double { 0.925 + 0.075 * cos(2 * Double.pi * clock.t / interval) }
+
+    var body: some View {
+        Text(Self.glyphs[frame])
+            .font(.system(size: size, weight: .bold))
+            .foregroundColor(color)
+            .opacity(pulse ? pulseOpacity : 1.0)
+            .frame(width: max(size, 8), height: max(size, 8))
+    }
+}
+
 struct Spinner: View {
     let accent: Color
     let mode: IslandState.Mode
@@ -1765,7 +1874,8 @@ struct Spinner: View {
 /// arc swept clockwise from 12 o'clock — white when low, amber past a third, red past half.
 struct ContextRing: View {
     let pct: Double
-    private var fillColor: Color { contextFillColor(pct) }
+    var colorOverride: Color? = nil
+    private var fillColor: Color { colorOverride ?? contextFillColor(pct) }
     var body: some View {
         ZStack {
             Circle()
@@ -1875,6 +1985,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     private var liveTabCwd: [String: String] = [:]     // uuid → cwd, for idle (no-file) tab labels
     private var liveTabTitle: [String: String] = [:]   // uuid → last-known label, kept after a file is gone
     private var liveTabContext: [String: Double] = [:]  // uuid → last-known context fill, for idle rings
+    private var liveTabFocus: [String: String] = [:]    // tab key → focus descriptor, so idle (no-file) tabs stay clickable
     private var projectOrder: [String] = []             // dropdown group order, by first-seen (never reshuffled)
     private var activeWarpTab: String?                  // uuid of the tab focused in Warp (drives row highlight)
     private var lastDbActiveTab: String?                // last active tab Warp's DB reported (to detect real switches)
@@ -2589,6 +2700,7 @@ final class AppController: NSObject, NSApplicationDelegate {
                     self.lastSeenLive[u] = now
                     if !c.isEmpty { self.liveTabCwd[u] = c }
                 }
+                for (u, f) in live.focuses { self.liveTabFocus[u] = f }
                 // A tab counts as live if a scan saw it in the last 8s — smooths a single
                 // transient `ps` miss (scans are every 4s) so a live tab never flickers
                 // out, while a genuinely-closed tab clears in ~8-12s.
@@ -2735,6 +2847,14 @@ final class AppController: NSObject, NSApplicationDelegate {
         if s.mode == "compacted" { liveTabContext[id] = 0 }
         if let v = sf.focus { s.focus = v }
         if let v = sf.cwd { s.cwd = v }
+        // Ghostty sessions written before AppleScript focus existed (or with cwd unknown at the
+        // time) carry the generic app: descriptor. We know the cwd here, so upgrade to a
+        // working-directory match — click then focuses the exact tab without needing a re-emit.
+        if s.focus == "app:com.mitchellh.ghostty", !s.cwd.isEmpty { s.focus = "ghostty:\(s.cwd)" }
+        // Same for VS Code / Cursor sessions written before CLI window-focus existed.
+        if s.focus.hasPrefix("app:"), !s.cwd.isEmpty, (id.hasPrefix("cursor-") || id.hasPrefix("vscode-")) {
+            s.focus = "editor:\(s.focus.dropFirst(4)):\(s.cwd)"
+        }
         if let v = sf.transcript { s.transcript = v }
         if let v = sf.ts { s.ts = v }
         if sf.kind == "prompt" {                  // a new turn the user just started
@@ -2785,7 +2905,7 @@ final class AppController: NSObject, NSApplicationDelegate {
                     let proj = cwd.isEmpty ? "Claude Code" : (cwd as NSString).lastPathComponent
                     let label = liveTabTitle[u] ?? ""
                     return SessionCard(id: u, project: proj, title: label.isEmpty ? proj : label,
-                                       status: "idle", focus: "warp://session/\(u)",
+                                       status: "idle", focus: liveTabFocus[u] ?? "warp://session/\(u)",
                                        context: liveTabContext[u] ?? 0)
                 }
             if !s.dropdownOpen {
@@ -2967,7 +3087,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         for u in liveTabs where u != "local" && vis[u] == nil && !suppress.contains(u) {
             let s = LiveSession()
             s.mode = "idle"
-            s.focus = "warp://session/\(u)"
+            s.focus = liveTabFocus[u] ?? "warp://session/\(u)"
             let cwd = liveTabCwd[u] ?? ""
             s.project = cwd.isEmpty ? "Claude Code" : (cwd as NSString).lastPathComponent
             // Prefer the tab's last-known session title over its directory name.
@@ -2990,6 +3110,9 @@ final class AppController: NSObject, NSApplicationDelegate {
         state.cards = ordered.filter { $0.key != front }.prefix(5).map { makeCard($0.key, $0.value) }
         // dropdown roster: every live tab (front + others + idle), most-recent first.
         state.roster = ordered.map { makeCard($0.key, $0.value) }
+        // Tag rows with their terminal-app icon only when the roster actually spans ≥2 apps —
+        // otherwise the icon is redundant (everything's in the same terminal) and just noise.
+        state.showTermIcons = Set(state.roster.compactMap { terminalBundleId(focus: $0.focus, id: $0.id) }).count >= 2
 
         // Dropdown group order = the order projects were FIRST SEEN by the daemon, persisted
         // to disk so it reflects when each tab was first opened and survives restarts. A new
@@ -3079,23 +3202,30 @@ final class AppController: NSObject, NSApplicationDelegate {
     /// Live (non-forked) Warp tabs running claude, mapped to each tab's working
     /// directory (from the env dump) so a tab with no state file can still be
     /// labelled by its project name.
-    private func computeLiveTabs() -> (cwds: [String: String], sids: [String: String]) {
+    private func computeLiveTabs() -> (cwds: [String: String], sids: [String: String], focuses: [String: String]) {
         let pids = shell("/usr/bin/pgrep", ["-U", "\(getuid())", "-f", "claude"])
             .split(separator: "\n").map(String.init)
-        var cwds = [String: String](), sids = [String: String](), excluded = Set<String>()
-        guard !pids.isEmpty else { return (cwds, sids) }
+        var cwds = [String: String](), sids = [String: String](), focuses = [String: String]()
+        var excluded = Set<String>()
+        guard !pids.isEmpty else { return (cwds, sids, focuses) }
         // ONE `ps eww` for the whole pid LIST (env dumps inline per row). A pid list isn't
         // truncated the way `ps -axeww` is, so we keep the full env — but spawn ps once, not
-        // once per process (was ~15 spawns per 4s scan).
-        let dump = shell("/bin/ps", ["eww", "-o", "pid=,command=", "-p", pids.joined(separator: ",")])
+        // once per process (was ~15 spawns per 4s scan). `tty=` gives each process's controlling
+        // terminal (for the AppleScript focus target of idle non-Warp tabs).
+        let dump = shell("/bin/ps", ["eww", "-o", "pid=,tty=,command=", "-p", pids.joined(separator: ",")])
         for raw in dump.split(separator: "\n") {
             let line = String(raw)
-            guard let u = uuidIn(line) else { continue }
+            // Layout: "<pid> <tty> <command…> <ENV…>". Take pid + tty off the front; the rest
+            // (command + inlined env) is searched as a substring, so we hand tabIdentity the whole line.
+            let head = line.split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
+            guard head.count >= 2 else { continue }
+            let pid = String(head[0]); let tty = String(head[1])
+            guard let ident = tabIdentity(line, tty: tty) else { continue }
+            let u = ident.key
             if cwds[u] == nil { cwds[u] = cwdIn(line) }
+            if focuses[u] == nil { focuses[u] = ident.focus }
             // CC writes ~/.claude/sessions/<pid>.json with this process's sessionId, so the tab
-            // can resolve its own transcript (and thus its ai-title) even while idle. The row's
-            // leading token is the pid; map it to the tab's uuid.
-            let pid = line.trimmingCharacters(in: .whitespaces).prefix { $0.isNumber }
+            // can resolve its own transcript (and thus its ai-title) even while idle.
             if sids[u] == nil, !pid.isEmpty,
                let data = FileManager.default.contents(atPath: kCCSessionsDir + "/" + pid + ".json"),
                let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -3104,8 +3234,8 @@ final class AppController: NSObject, NSApplicationDelegate {
                 excluded.insert(u)   // forked / computer-use session — hide it
             }
         }
-        for u in excluded { cwds.removeValue(forKey: u); sids.removeValue(forKey: u) }
-        return (cwds, sids)
+        for u in excluded { cwds.removeValue(forKey: u); sids.removeValue(forKey: u); focuses.removeValue(forKey: u) }
+        return (cwds, sids, focuses)
     }
 
     /// Transcript path for a CC sessionId, found by globbing the per-project dirs (the dir
@@ -3330,6 +3460,16 @@ final class AppController: NSObject, NSApplicationDelegate {
     /// never overridden here (avoids re-introducing false "waiting for input").
     @objc private func pollLiveStatus() {
         guard !sessions.isEmpty else { return }
+        // Everything below (CC status + transcript scan) is computed off-thread and applied
+        // a beat later. A hook (e.g. UserPromptSubmit) can land on `s` in between — most
+        // visibly, sending a message while idle sets mode="thinking" via merge() right as a
+        // poll cycle that STARTED just before is still mid-flight with pre-prompt data. That
+        // stale data can read CC as still "idle" and the (now superseded) transcript tail as
+        // ending on an old "Request interrupted by user" marker, stomping the fresh
+        // thinking/working state with a false "interrupted" the instant the message is sent.
+        // Snapshotting `now` here and skipping any session merge() has touched since lets the
+        // next cycle (whose data postdates that hook) apply the correction instead.
+        let snapStart = Date().timeIntervalSince1970
         // Snapshot (tabUUID, sessionId, transcript) for sessions that have a transcript.
         let snap: [(String, String, String)] = sessions.compactMap { (k, v) in
             guard !v.transcript.isEmpty else { return nil }
@@ -3354,6 +3494,10 @@ final class AppController: NSObject, NSApplicationDelegate {
                 let activeModes: Set<String> = ["working", "thinking", "struggling", "error"]
                 for (uuid, sessionId, _) in snap {
                     guard let s = self.sessions[uuid] else { continue }
+                    // A hook already moved this session on since we started scanning — our
+                    // snapshot predates that update, so don't let it clobber the fresher state.
+                    // (See the staleness note above pollLiveStatus.)
+                    if s.ts > snapStart { continue }
                     // A live API/connection error is the top-priority signal: show red with the
                     // message while it persists, and let it auto-clear (below) once the agent
                     // recovers. The daemon fully owns this state — no hook fires for it.
@@ -3429,10 +3573,54 @@ final class AppController: NSObject, NSApplicationDelegate {
         return ai
     }
 
-    private func uuidIn(_ s: String) -> String? {
-        guard let r = s.range(of: "WARP_TERMINAL_SESSION_UUID=") else { return nil }
-        let u = s[r.upperBound...].prefix { $0.isHexDigit }
-        return u.isEmpty ? nil : String(u)
+    /// Identify the terminal tab that owns a Claude Code process from its `ps eww` line (the env
+    /// dump is inlined). Returns the state-file key — which MUST match what the hook writes, so
+    /// it's built from the same per-tab env var the hook keys on — plus a scheme-tagged focus
+    /// descriptor. `tty` is the process's tty column (may be "??"; only used to focus idle tabs
+    /// that have no state file). nil → a terminal we don't track per-tab (folds into "local").
+    private func tabIdentity(_ s: String, tty: String) -> (key: String, focus: String)? {
+        if let r = s.range(of: "WARP_TERMINAL_SESSION_UUID=") {
+            let u = s[r.upperBound...].prefix { $0.isHexDigit }
+            return u.isEmpty ? nil : (String(u), "warp://session/\(u)")
+        }
+        // A real tty (from the interactive shell, not the detached CC process) lets us build an
+        // AppleScript focus target for idle tabs; without one we can only bring the app frontmost.
+        let dev = (tty.isEmpty || tty == "??") ? "" : "/dev/" + (tty as NSString).lastPathComponent
+        func envVal(_ key: String) -> String? {
+            guard let r = s.range(of: key) else { return nil }
+            let v = s[r.upperBound...].prefix { $0 != " " }
+            return v.isEmpty ? nil : String(v)
+        }
+        if s.contains("TERM_PROGRAM=iTerm.app"), let sid = envVal("ITERM_SESSION_ID=") {
+            let focus = dev.isEmpty ? "app:com.googlecode.iterm2" : "term:iterm2:\(dev)"
+            return ("iterm-" + sid.replacingOccurrences(of: ":", with: "-"), focus)
+        }
+        if s.contains("TERM_PROGRAM=Apple_Terminal"), let sid = envVal("TERM_SESSION_ID=") {
+            let focus = dev.isEmpty ? "app:com.apple.Terminal" : "term:apple_terminal:\(dev)"
+            return ("aterm-" + sid.replacingOccurrences(of: ":", with: "-"), focus)
+        }
+        if s.contains("TERM_PROGRAM=ghostty"), !dev.isEmpty {
+            // Ghostty is AppleScript-focusable — match its tab by working directory (from the env).
+            let cwd = cwdIn(s)
+            let focus = cwd.isEmpty ? "app:com.mitchellh.ghostty" : "ghostty:\(cwd)"
+            return ("ghostty-" + (dev as NSString).lastPathComponent, focus)
+        }
+        if s.contains("TERM_PROGRAM=vscode"), !dev.isEmpty {
+            // VS Code / Cursor integrated terminal — same detection the hook uses, so the key
+            // matches. `__CFBundleIdentifier` (inherited from the launching editor) both tells
+            // Cursor from VS Code and gives the exact bundle for the app-activate focus + icon.
+            let base = (dev as NSString).lastPathComponent
+            let cf = envVal("__CFBundleIdentifier=") ?? ""
+            let isCursor = cf.lowercased().contains("cursor") || cf.lowercased().contains("todesktop")
+                || (envVal("VSCODE_GIT_ASKPASS_NODE=") ?? "").contains("Cursor")
+            let bundle = cf.isEmpty ? (isCursor ? "com.todesktop.230313mzl4w4u92" : "com.microsoft.VSCode") : cf
+            // The `code`/`cursor` CLI focuses the window holding this cwd's workspace (no side
+            // effects) — a real upgrade over app-activate when several editor windows are open.
+            let cwd = cwdIn(s)
+            let focus = cwd.isEmpty ? "app:\(bundle)" : "editor:\(bundle):\(cwd)"
+            return ("\(isCursor ? "cursor" : "vscode")-\(base)", focus)
+        }
+        return nil
     }
 
     private func shell(_ path: String, _ args: [String]) -> String {
@@ -3541,10 +3729,10 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     /// Back-card / dropdown-row click: focus that tab and promote it to the front pill.
     func focusCardTab(_ id: String) {
-        // Idle tabs have no state file; reconstruct the focus URL from the uuid so the
-        // click still jumps to the tab. They can't be pinned (never front), so don't.
-        openFocus(sessions[id]?.focus ?? "warp://session/\(id)")
-        // The click focuses this tab in Warp, but a deep-link focus doesn't update Warp's
+        // Idle tabs have no state file; reconstruct the focus descriptor from the live-tab map
+        // (or the Warp uuid) so the click still jumps to the tab. They can't be pinned, so don't.
+        openFocus(sessions[id]?.focus ?? liveTabFocus[id] ?? "warp://session/\(id)")
+        // The click focuses this tab, but a deep-link/AppleScript focus doesn't update Warp's
         // active_tab_index — so highlight it optimistically; the DB will only override this
         // once the user manually switches tabs (applyDBActiveTab detects the change).
         activeWarpTab = id
@@ -3560,9 +3748,130 @@ final class AppController: NSObject, NSApplicationDelegate {
         rebuild()
     }
 
+    /// Jump to the tab a session lives in. The descriptor is scheme-tagged by the hook/liveness
+    /// probe so one call site handles every terminal:
+    ///   term:<kind>:<tty>       AppleScript-focus the tab owning <tty> (Terminal / iTerm2)
+    ///   app:<bundleid>          just bring the app frontmost (Ghostty & other no-scripting terms)
+    ///   warp://… (or any URL)   hand to NSWorkspace (Warp's deep link)
     private func openFocus(_ url: String) {
+        if url.hasPrefix("term:") {
+            let rest = String(url.dropFirst("term:".count))
+            let parts = rest.split(separator: ":", maxSplits: 1).map(String.init)
+            if parts.count == 2 { focusTerminalTTY(kind: parts[0], tty: parts[1]); return }
+        }
+        if url.hasPrefix("ghostty:") { focusGhostty(cwd: String(url.dropFirst("ghostty:".count))); return }
+        if url.hasPrefix("editor:") {
+            // editor:<bundleid>:<cwd>
+            let rest = String(url.dropFirst("editor:".count))
+            let parts = rest.split(separator: ":", maxSplits: 1).map(String.init)
+            if parts.count == 2 { focusEditor(bundleId: parts[0], cwd: parts[1]); return }
+        }
+        if url.hasPrefix("app:") { activateBundle(String(url.dropFirst("app:".count))); return }
         if !url.isEmpty, let u = URL(string: url) { NSWorkspace.shared.open(u) }
         else { activateWarp() }
+    }
+
+    /// Focus the exact Ghostty tab whose terminal is in `cwd` (Ghostty ships an AppleScript
+    /// dictionary but exposes no tty/pid, so working directory is the match key). Falls back to
+    /// activating the app if nothing matches. Off-main — osascript is synchronous.
+    private func focusGhostty(cwd: String) {
+        guard !cwd.isEmpty else { activateBundle("com.mitchellh.ghostty"); return }
+        let q = cwd.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        let script = """
+        tell application "Ghostty"
+          activate
+          repeat with w in windows
+            repeat with t in tabs of w
+              if (working directory of (focused terminal of t)) is "\(q)" then
+                activate window w
+                select tab t
+                focus (focused terminal of t)
+                return
+              end if
+            end repeat
+          end repeat
+        end tell
+        """
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            _ = self?.shell("/usr/bin/osascript", ["-e", script])
+        }
+    }
+
+    /// Focus the VS Code / Cursor WINDOW that has `cwd`'s workspace open, via that editor's CLI
+    /// (`code`/`cursor -r <cwd>`) — it targets the right window with no side effects, no extra
+    /// permission. Falls back to app-activate if the CLI can't be found. Off-main (CLI is ~1s).
+    private func focusEditor(bundleId: String, cwd: String) {
+        guard let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) else {
+            activateBundle(bundleId); return
+        }
+        // Cursor ships its CLI as `bin/cursor`, VS Code as `bin/code`; the bin dir holds one CLI.
+        let binDir = appURL.appendingPathComponent("Contents/Resources/app/bin")
+        let candidates = ["cursor", "code", "codium", "code-insiders"].map { binDir.appendingPathComponent($0).path }
+        guard let cli = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+            activateBundle(bundleId); return
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            _ = self?.shell(cli, ["-r", cwd])
+            // The CLI focuses the window but doesn't always steal app focus reliably; nudge it.
+            DispatchQueue.main.async { self?.activateBundle(bundleId) }
+        }
+    }
+
+    /// Bring an app frontmost by bundle id (launch it if it isn't running). The Ghostty/VS Code
+    /// tier — no per-tab scripting, so this is as precise as we can get.
+    private func activateBundle(_ bundleId: String) {
+        if let a = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleId }) {
+            a.activate(options: [.activateAllWindows])
+        } else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
+            NSWorkspace.shared.openApplication(at: url, configuration: NSWorkspace.OpenConfiguration(), completionHandler: nil)
+        }
+    }
+
+    /// Focus the exact Terminal/iTerm tab that owns `tty` via AppleScript (the terminal exposes
+    /// `tty` per tab/session; the deep-link equivalent Warp gives us for free). Runs off-main —
+    /// osascript is synchronous and would otherwise stall the click.
+    private func focusTerminalTTY(kind: String, tty: String) {
+        let script: String
+        switch kind {
+        case "apple_terminal":
+            script = """
+            tell application "Terminal"
+              activate
+              repeat with w in windows
+                repeat with t in tabs of w
+                  if tty of t is "\(tty)" then
+                    set frontmost of w to true
+                    set selected of t to true
+                    return
+                  end if
+                end repeat
+              end repeat
+            end tell
+            """
+        case "iterm2":
+            script = """
+            tell application "iTerm2"
+              activate
+              repeat with w in windows
+                repeat with t in tabs of w
+                  repeat with s in sessions of t
+                    if tty of s is "\(tty)" then
+                      select w
+                      select t
+                      select s
+                      return
+                    end if
+                  end repeat
+                end repeat
+              end repeat
+            end tell
+            """
+        default:
+            activateWarp(); return
+        }
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            _ = self?.shell("/usr/bin/osascript", ["-e", script])
+        }
     }
 
     // MARK: - Elapsed timer (front session)

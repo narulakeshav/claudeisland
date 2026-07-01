@@ -284,19 +284,102 @@ def consec_tool_errors(entries):
     return n
 
 
+def _controlling_tty():
+    # The tty AppleScript matches against to focus the exact tab (Terminal/iTerm), and it also
+    # keys ghostty/vscode sessions — so this MUST be reliable: an intermittent "" makes the same
+    # session flip its state-file name (e.g. cursor-ttysNNN ⇄ local), which the daemon then
+    # dedups against itself, blinking the row in and out.
+    #
+    # Fast, subprocess-free path first: under Terminal/iTerm/Ghostty/Cursor the CC process keeps
+    # a real controlling tty, so one of its inherited fds is that tty. os.ttyname can't time out.
+    for fd in (2, 1, 0):
+        try:
+            if os.isatty(fd):
+                return os.ttyname(fd)
+        except Exception:
+            pass
+    # Fallback (e.g. all fds redirected): walk UP the process tree to the first ancestor that
+    # still owns a tty — the interactive shell above CC does even when CC itself detached (Warp).
+    pid = os.getppid()
+    for _ in range(10):
+        try:
+            out = subprocess.run(["/bin/ps", "-o", "tty=,ppid=", "-p", str(pid)],
+                                 capture_output=True, text=True, timeout=5).stdout.split()
+        except Exception:
+            return ""
+        if not out:
+            return ""
+        t = out[0]
+        if t and t != "??":
+            return t if t.startswith("/dev/") else "/dev/" + t
+        if len(out) >= 2 and out[1].isdigit() and out[1] != "0":
+            pid = int(out[1])
+        else:
+            return ""
+    return ""
+
+
+def detect_terminal(cwd=""):
+    """Identify the terminal tab this session runs in. Returns (kind, tab_id, focus).
+
+    tab_id keys the state file (one card per tab) and MUST match what the daemon derives from
+    the CC process env — so it's built from a per-tab env var the daemon can read too (mirrors
+    the proven Warp uuid path). focus is a scheme-tagged descriptor the daemon dispatches on:
+        warp://session/<uuid>   Warp deep link            (NSWorkspace.open)
+        term:<kind>:<tty>       AppleScript-driven tabs    (focus the tab owning <tty>)
+        app:<bundleid>          no per-tab scripting        (just bring the app frontmost)
+    Unknown terminals fold into the single always-visible "local" card (unchanged behavior).
+    """
+    warp_uuid = os.environ.get("WARP_TERMINAL_SESSION_UUID", "")
+    warp_focus = os.environ.get("WARP_FOCUS_URL", "")
+    if warp_uuid or warp_focus:
+        tab = warp_uuid or (warp_focus.rsplit("/", 1)[-1] if warp_focus else "")
+        return "warp", (tab or "local"), warp_focus
+    tp = os.environ.get("TERM_PROGRAM", "")
+    tty = _controlling_tty()
+    if tp == "iTerm.app":
+        sid = os.environ.get("ITERM_SESSION_ID", "")
+        if sid:
+            focus = ("term:iterm2:" + tty) if tty else "app:com.googlecode.iterm2"
+            return "iterm2", "iterm-" + sid.replace(":", "-"), focus
+    elif tp == "Apple_Terminal":
+        sid = os.environ.get("TERM_SESSION_ID", "")
+        if sid:
+            focus = ("term:apple_terminal:" + tty) if tty else "app:com.apple.Terminal"
+            return "apple_terminal", "aterm-" + sid.replace(":", "-"), focus
+    elif tp == "ghostty" and tty:
+        # Ghostty has no per-tab env id, so key by tty. But it DOES ship an AppleScript
+        # dictionary, so we can focus the exact tab on click — matched by working directory
+        # (encoded in the descriptor; the daemon iterates Ghostty's terminals to find it).
+        focus = ("ghostty:" + cwd) if cwd else "app:com.mitchellh.ghostty"
+        return "ghostty", "ghostty-" + tty.rsplit("/", 1)[-1], focus
+    elif tp == "vscode" and tty:
+        # VS Code / Cursor integrated terminal (both report TERM_PROGRAM=vscode). No per-panel
+        # scripting to reach a specific terminal, but the `code`/`cursor` CLI can focus the
+        # WINDOW holding a workspace via `-r <cwd>` — targets the right window with no side
+        # effects. `__CFBundleIdentifier` (set by the launching app, inherited here) tells Cursor
+        # from VS Code, gives the bundle for icon/app-resolve. Encode bundle+cwd; daemon runs the CLI.
+        bundle = os.environ.get("__CFBundleIdentifier", "")
+        is_cursor = ("cursor" in bundle.lower() or "todesktop" in bundle.lower()
+                     or "Cursor" in os.environ.get("VSCODE_GIT_ASKPASS_NODE", ""))
+        if not bundle:
+            bundle = "com.todesktop.230313mzl4w4u92" if is_cursor else "com.microsoft.VSCode"
+        kind = "cursor" if is_cursor else "vscode"
+        focus = ("editor:" + bundle + ":" + cwd) if cwd else ("app:" + bundle)
+        return kind, kind + "-" + tty.rsplit("/", 1)[-1], focus
+    return "local", "local", ""
+
+
 def main():
     d = read_stdin()
     cwd = d.get("cwd") or os.getcwd()
     project = os.path.basename(cwd.rstrip("/")) or "Claude Code"
     title = "Claude Code · " + project
 
-    # Warp sets a per-tab/pane deep link + uuid in the shell env; hooks run as children of
-    # Claude Code inside that tab, so we inherit them. The uuid keys this session's file (one
-    # card per tab) and the link refocuses the exact tab on click. Non-Warp shells → "local".
-    focus = os.environ.get("WARP_FOCUS_URL", "")
-    tab = (os.environ.get("WARP_TERMINAL_SESSION_UUID", "")
-           or (focus.rsplit("/", 1)[-1] if focus else "")
-           or "local")
+    # Hooks run as children of Claude Code inside the terminal tab, so we inherit the terminal's
+    # env. From it we derive a stable per-tab id (keys this session's file — one card per tab)
+    # and a focus descriptor the daemon dispatches on to jump back to the tab. See detect_terminal.
+    kind, tab, focus = detect_terminal(cwd)
     session_out = "sessions/%s.json" % tab
     ts = float(int(time.time()))
     transcript = d.get("transcript_path", "") or ""
