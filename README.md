@@ -1,9 +1,9 @@
-# claudeisland
+# claude-code-island
 
 A live-activity **island in your Mac's notch** for [Claude Code](https://docs.anthropic.com/en/docs/claude-code). It shows what every session is doing — thinking, running a tool, waiting on you, done — across all your terminals at once, and clicking a session jumps you back to the exact tab it's running in.
 
 ```bash
-npx claudeisland install
+npx claude-code-island install
 ```
 
 > Requires a Mac with a notch (macOS 13+) and Xcode Command Line Tools (`xcode-select --install`).
@@ -35,14 +35,14 @@ Detection and app-icon tagging work everywhere; click-to-focus fidelity depends 
 ## Commands
 
 ```bash
-npx claudeisland install     # compile, install, wire up the Claude Code hook
-npx claudeisland test        # cycle through the states so you can see it
-npx claudeisland uninstall   # remove the app, hook, and config
+npx claude-code-island install     # compile, install, wire up the Claude Code hook
+npx claude-code-island test        # cycle through the states so you can see it
+npx claude-code-island uninstall   # remove the app, hook, and config
 ```
 
 ## How it works
 
-Claude Code [hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) fire on each turn. `claudeisland` installs a small hook that, on every event, extracts the session's state from the transcript and writes it to `~/.claude-island/sessions/<tab>.json`. A lightweight native menu-bar daemon watches that folder and renders the notch pill.
+Claude Code [hooks](https://docs.anthropic.com/en/docs/claude-code/hooks) fire on each turn. `claude-code-island` installs a small hook that, on every event, extracts the session's state from the transcript and writes it to `~/.claude-island/sessions/<tab>.json`. A lightweight native menu-bar daemon watches that folder and renders the notch pill.
 
 Because the daemon just renders those session files, the Claude-specific part is only the hook — the surface itself is agent-agnostic by design.
 
@@ -55,7 +55,7 @@ Because the daemon just renders those session files, the Claude-specific part is
 ## Uninstall
 
 ```bash
-npx claudeisland uninstall
+npx claude-code-island uninstall
 ```
 
 Removes the app bundle, the LaunchAgent, and the hook from `~/.claude/settings.json`.

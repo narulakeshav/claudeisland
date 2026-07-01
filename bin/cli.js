@@ -50,8 +50,8 @@ function center(text, width) {
   return " ".repeat(left) + text + " ".repeat(right);
 }
 
-const titleBar = `─── ${c.reset}${c.bold}${c.white}claudeisland${c.reset} ${c.dim}v${VERSION} `;
-const titleVis = `─── claudeisland v${VERSION} `;
+const titleBar = `─── ${c.reset}${c.bold}${c.white}claude-code-island${c.reset} ${c.dim}v${VERSION} `;
+const titleVis = `─── claude-code-island v${VERSION} `;
 const titlePad = "─".repeat(Math.max(0, W - titleVis.length));
 
 const LOGO = `
@@ -223,7 +223,7 @@ async function install() {
   log();
   console.log(`  ${c.orange}◆${c.reset} ${c.bold}${c.white}You're all set!${c.reset}`);
   log();
-  info(`Test it: ${c.white}npx claudeisland test${c.reset}`);
+  info(`Test it: ${c.white}npx claude-code-island test${c.reset}`);
   log();
   info(`${c.dim}The pill shows a live spinner while Claude works, expands${c.reset}`);
   info(`${c.dim}when it needs you, and collapses to ✓ when it's done.${c.reset}`);
@@ -329,7 +329,7 @@ function uninstall() {
   }
 
   log();
-  console.log(`  ${c.orange}◆${c.reset} ${c.bold}${c.white}Uninstalled.${c.reset} ${c.dim}Thanks for trying claudeisland!${c.reset}`);
+  console.log(`  ${c.orange}◆${c.reset} ${c.bold}${c.white}Uninstalled.${c.reset} ${c.dim}Thanks for trying claude-code-island!${c.reset}`);
   log();
 }
 
@@ -338,7 +338,7 @@ function uninstall() {
 async function test() {
   const send = path.join(MACOS_DIR, "island-send");
   if (!fs.existsSync(send)) {
-    warn(`Not installed. Run: ${c.white}npx claudeisland install${c.reset}`);
+    warn(`Not installed. Run: ${c.white}npx claude-code-island install${c.reset}`);
     process.exit(1);
   }
 
@@ -401,6 +401,6 @@ switch (command) {
     log(`  ${c.orange}test${c.reset}        Run through the states`);
     log(`  ${c.orange}uninstall${c.reset}   Remove everything`);
     log();
-    info(`npx claudeisland install`);
+    info(`npx claude-code-island install`);
     log();
 }
