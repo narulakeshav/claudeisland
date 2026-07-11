@@ -2062,21 +2062,25 @@ struct IslandView: View {
             let peak = tokens.max() ?? 0
             // Inline flanks: "7 days" · cells · "Today". Fixed-width labels keep the cell row
             // exactly centered under the pill so the hover hit-test lines up.
-            HStack(spacing: 7) {
+            HStack(spacing: 6) {
                 Text("7 days").font(.custom(kSansFontName, size: 11)).foregroundColor(label)
-                    .frame(width: 44, alignment: .leading)
+                    .frame(width: 44, alignment: .trailing)   // hug the cells; padding falls outside
                 HStack(spacing: Self.gap) {
                     ForEach(Array(levels.enumerated()), id: \.offset) { i, _ in
+                        let op = Self.opacity(i < tokens.count ? tokens[i] : 0, peak: peak)
+                        // Faint outline only on near-black (idle) cells so they stay visible;
+                        // bright cells read on their own. Hovered cell always gets a full ring.
+                        let border: Color = i == hovered ? .white
+                            : (op < 0.20 ? Color.white.opacity(0.18) : .clear)
                         RoundedRectangle(cornerRadius: 3, style: .continuous)
-                            .fill(Color.white.opacity(Self.opacity(i < tokens.count ? tokens[i] : 0, peak: peak)))
-                            .overlay(  // ring the hovered cell so the tooltip's day is obvious
-                                RoundedRectangle(cornerRadius: 3, style: .continuous)
-                                    .strokeBorder(Color.white, lineWidth: i == hovered ? 1 : 0))
+                            .fill(Color.white.opacity(op))
+                            .overlay(RoundedRectangle(cornerRadius: 3, style: .continuous)
+                                        .strokeBorder(border, lineWidth: 1))
                             .frame(width: Self.cell, height: Self.cell)
                     }
                 }
                 Text("Today").font(.custom(kSansFontName, size: 11)).foregroundColor(label)
-                    .frame(width: 44, alignment: .trailing)
+                    .frame(width: 44, alignment: .leading)   // hug the cells; padding falls outside
             }
             // Floating tooltip: a self-contained chip below the cells, drawn only on hover so it
             // costs no layout height. Matches the dropdown's compactTooltip (capsule, size 11).
