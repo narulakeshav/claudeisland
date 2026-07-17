@@ -259,7 +259,11 @@ async function install() {
   hr();
   log();
 
-  migrateFromLegacy();
+  // Migrate ONLY when we'll also rewrite the hooks (i.e. not --no-hooks). Removing the old app
+  // without repointing hooks that still target it would orphan them (/bin/sh: …/ClaudeIsland.app/
+  // …/island-hook.py: No such file). A --no-hooks rebuild is for an already-installed AgentsIsland
+  // anyway, where there's nothing to migrate.
+  if (!process.argv.includes("--no-hooks")) migrateFromLegacy();
 
   // Step 1: Build
   log(`${c.dim}Step 1 of 3${c.reset}  ${c.white}Build${c.reset}`);
