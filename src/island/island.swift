@@ -2617,7 +2617,12 @@ final class AppController: NSObject, NSApplicationDelegate {
 
     private var statusItem: NSStatusItem?
     private var pauseMenuItem: NSMenuItem?
+    private var showCodexItem: NSMenuItem?
     private var paused = false
+    // Whether Codex Desktop cards (cdex-*) show in the roster. A display toggle only — the watcher
+    // keeps writing the files; this just filters them out of visibleSessions. Persisted, defaults
+    // on (the point of Codex support is to see it), so an unset install shows Codex from the start.
+    private var showCodex = UserDefaults.standard.object(forKey: "showCodex") as? Bool ?? true
 
     /// A menu bar presence — the conventional home for quitting a background utility (a plain
     /// Quit would just be relaunched by the KeepAlive agent) and a persistent "it's installed"
@@ -2631,12 +2636,20 @@ final class AppController: NSObject, NSApplicationDelegate {
         pause.target = self
         menu.addItem(pause)
         menu.addItem(.separator())
+        // A checkable "Show Codex" — visible whether or not Codex is installed, so it also
+        // signals that the island can surface Codex at all. Its ✓ reflects the persisted pref.
+        let codex = NSMenuItem(title: "Show Codex", action: #selector(toggleShowCodex), keyEquivalent: "")
+        codex.target = self
+        codex.state = showCodex ? .on : .off
+        menu.addItem(codex)
+        menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Claude Island", action: #selector(quitIsland), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
         item.menu = menu
         statusItem = item
         pauseMenuItem = pause
+        showCodexItem = codex
     }
 
     /// The notch silhouette as a menu bar template image — the same concave re-entrant shoulder
@@ -2671,6 +2684,13 @@ final class AppController: NSObject, NSApplicationDelegate {
         paused.toggle()
         pauseMenuItem?.title = paused ? "Resume" : "Pause"
         if paused { panel.orderOut(nil) } else { rebuild() }
+    }
+
+    @objc private func toggleShowCodex() {
+        showCodex.toggle()
+        UserDefaults.standard.set(showCodex, forKey: "showCodex")
+        showCodexItem?.state = showCodex ? .on : .off
+        rebuild()   // visibleSessions re-filters cdex-* in/out on the next roster build
     }
 
     @objc private func quitIsland() {
@@ -3747,7 +3767,8 @@ final class AppController: NSObject, NSApplicationDelegate {
         // instead and owns these files' whole lifecycle (it deletes them when a chat goes cold,
         // and the daemon prunes any session whose file vanished). So trust the file's existence.
         sessions.filter { (k, _) in
-            (liveTabs.contains(k) || k == "local" || k.hasPrefix("cdex-")) && !suppress.contains(k)
+            let codexShown = showCodex && k.hasPrefix("cdex-")   // gated by the menu-bar toggle
+            return (liveTabs.contains(k) || k == "local" || codexShown) && !suppress.contains(k)
         }
     }
 
